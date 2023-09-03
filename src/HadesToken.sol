@@ -8,7 +8,7 @@ contract HadesToken is ERC20, Ownable {
     mapping(address => bool) public isLP;
     mapping(address => bool) public isExcludedFromFee;
 
-    uint private constant MAX_SUPPLY = 1_000_000_000 ether;
+    uint private constant MAX_SUPPLY = 5_000_000 ether;
     uint public threshold = MAX_SUPPLY / 1000; // 0.1% of total supply
     uint public buyBBV = 50;
     uint public buyLiq = 25;
