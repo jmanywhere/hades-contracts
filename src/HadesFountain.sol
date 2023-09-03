@@ -14,6 +14,19 @@ error HadesFountain__InvalidUpline(address);
 error HadesFountain__MaxPayoutReached();
 error HadesFountain__InvalidMinimum();
 
+//TODO s
+/*
+    - NFV = NetFaucet - claims, check that rolls are not a net zero thing.
+    - cap payout is always 100k HADES regardless.
+    - if user drops to zero, they are done.
+    - if user has a time diff of 7 days since last action, they dont accumulate any more rewards
+      - on day 8, the rewards can be "LIQUIDATED" which means it gets added to another users's faucet.
+      - each second after day 8 starts, a portion of the user's NFV is substracted and added to the liquidator's NFV
+        - Liquidator HAS to have a FAUCET and NOT be DONE otherwise tx will fail.
+        - Liquidations count as claims.
+    - REvisit Whale Fee
+ */
+
 contract HadesFountain is Ownable {
     struct Accounting {
         uint256 netFaucet; // User level NetFaucetValue
@@ -361,7 +374,7 @@ contract HadesFountain is Ownable {
         Accounting storage user = accounting[_receiver];
         require(user.deposits > 0, "NonPlayer");
         claimRebase(_receiver, true, false);
-        (uint256 grossPayout, , , ) = faucetPayout(_receiver);
+        (uint256 grossPayout, , ) = faucetPayout(_receiver);
         user.accFaucet = grossPayout;
         // KICKBACK Calculation
         uint256 leaderKick = 0;
@@ -427,12 +440,7 @@ contract HadesFountain is Ownable {
         _grossFaucetValue = _netFaucetValue + user.rebaseCompounded;
         uint256 sustainableFee;
         uint256 grossPayout;
-        (
-            grossPayout,
-            _faucetMaxPayout,
-            _faucetPayout,
-            sustainableFee
-        ) = faucetPayout(_user);
+        (grossPayout, _faucetPayout, sustainableFee) = faucetPayout(_user);
 
         // If there are any whale taxes, apply those to the rebasePayout
         if (sustainableFee > 0 && _rebasePayout > 0) {
@@ -440,6 +448,7 @@ contract HadesFountain is Ownable {
                 (_rebasePayout * (grossPayout - sustainableFee)) /
                 grossPayout;
         }
+        _faucetMaxPayout = MAX_PAYOUT - _grossClaimed;
     }
 
     function calculateRebase(
@@ -536,24 +545,22 @@ contract HadesFountain is Ownable {
         view
         returns (
             uint256 grossPayout,
-            uint256 maxPayout,
             uint256 netPayout,
             uint256 sustainabilityFee
         )
     {
         Accounting storage user = accounting[_user];
         Claims storage u_claims = claims[_user];
-        maxPayout = capPayout(user.netFaucet);
         // (uint256 share, ) = userLevel(_user, true);
         grossPayout = (block.timestamp - user.lastAction);
-        if (u_claims.faucetClaims + u_claims.rebaseClaims < maxPayout) {
+        if (u_claims.faucetClaims + u_claims.rebaseClaims < MAX_PAYOUT) {
             grossPayout =
                 (grossPayout * (user.netFaucet * 1e12)) /
                 (100e12 * (24 hours));
             grossPayout += user.accFaucet;
 
-            if (u_claims.faucetClaims + grossPayout > maxPayout)
-                grossPayout = maxPayout - u_claims.faucetClaims;
+            if (u_claims.faucetClaims + grossPayout > MAX_PAYOUT)
+                grossPayout = MAX_PAYOUT - u_claims.faucetClaims;
 
             uint256 feePercent = whaleFee(_user, grossPayout);
             if (feePercent > 0)
@@ -652,7 +659,7 @@ contract HadesFountain is Ownable {
             u_acc.done = false;
         }
         claimRebase(msg.sender, true, false);
-        (uint256 grossPayout, , , ) = faucetPayout(msg.sender);
+        (uint256 grossPayout, , ) = faucetPayout(msg.sender);
         u_acc.accFaucet += grossPayout;
         u_acc.lastAction = block.timestamp;
         // UPDATE BOOST VALUES
@@ -699,23 +706,18 @@ contract HadesFountain is Ownable {
         if (user.done) return 0;
         // REBASE CLAIMS DO COUNT TOWARDS MAX PAYOUT
         // DOUBLE CHECK FOR OVERFLOWS IF CLAIMS ARE WAY ABOVE CAPS
-        (
-            uint256 _gross,
-            uint256 max_payout,
-            uint256 _netPayout,
-
-        ) = faucetPayout(_user);
+        (uint256 _gross, uint256 _netPayout, ) = faucetPayout(_user);
         uint256 compoundTaxedPayout;
         if (_netPayout > 0) {
             if (
                 u_claims.faucetClaims + _netPayout + u_claims.rebaseClaims >=
-                max_payout
+                MAX_PAYOUT
             ) {
-                if (u_claims.faucetClaims + u_claims.rebaseClaims >= max_payout)
+                if (u_claims.faucetClaims + u_claims.rebaseClaims >= MAX_PAYOUT)
                     _netPayout = 0;
                 else
                     _netPayout =
-                        max_payout -
+                        MAX_PAYOUT -
                         u_claims.faucetClaims -
                         u_claims.rebaseClaims;
                 user.done = true;
@@ -914,14 +916,14 @@ contract HadesFountain is Ownable {
                         //This should only be called once
                         _team_found = true;
 
-                        (uint256 gross_payout_upline, , , ) = faucetPayout(_up);
+                        (uint256 gross_payout_upline, , ) = faucetPayout(_up);
                         accounting[_up].accFaucet = gross_payout_upline;
                         accounting[_up].airdrops_rcv += _up_share;
                         accounting[_up].lastAction = block.timestamp;
 
                         updateNetFaucet(_up);
 
-                        (uint256 gross_payout_user, , , ) = faucetPayout(_user);
+                        (uint256 gross_payout_user, , ) = faucetPayout(_user);
                         accounting[_user].accFaucet = gross_payout_user;
                         accounting[_user].lastAction = block.timestamp;
                         updateNetFaucet(_user);
@@ -941,7 +943,7 @@ contract HadesFountain is Ownable {
                         emit UplineAidrop(_user, _up, i + 1, _up_share);
                         emit Airdrop(_up, _user, _share);
                     } else {
-                        (uint256 gross_payout, , , ) = faucetPayout(_up);
+                        (uint256 gross_payout, , ) = faucetPayout(_up);
                         accounting[_up].accFaucet = gross_payout;
                         accounting[_up].airdrops_rcv += _bonus;
                         accounting[_up].lastAction = block.timestamp;
