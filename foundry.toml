@@ -5,6 +5,13 @@ libs = ["lib"]
 remappings=[
   "ds-test/=lib/forge-std/lib/ds-test/src/",
   "forge-std/=lib/forge-std/src/",
+  "openzeppelin-contracts/=lib/openzeppelin-contracts/",
+  "openzeppelin/=lib/openzeppelin-contracts/contracts/",
 ]
+
+[rpc_endpoints]
+bsc_testnet = "${TESTNET_RPC_URL}"
+[etherscan]
+bsc_testnet = { key = "${BSCSCAN_API}", url="https://api-testnet.bscscan.com/", chain=97}
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
