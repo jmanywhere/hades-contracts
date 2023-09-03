@@ -293,9 +293,8 @@ contract HadesFountain is Ownable {
         Accounting storage user = accounting[_user];
         Claims storage u_claim = claims[_user];
         if (
-            u_claim.faucetClaims + u_claim.rebaseClaims >=
-            capPayout(user.netFaucet) &&
-            user.netFaucet != 0
+            (u_claim.faucetClaims + u_claim.rebaseClaims >= MAX_PAYOUT &&
+                user.netFaucet != 0) || user.done
         ) revert HadesFountain__MaxPayoutReached();
         if (user.deposits == 0) {
             total_users++;
@@ -569,11 +568,6 @@ contract HadesFountain is Ownable {
         }
     }
 
-    function capPayout(uint nfv) public pure returns (uint) {
-        uint nfvCap = (nfv * MAX_DURATION) / PERCENT;
-        return (nfvCap > MAX_PAYOUT) ? MAX_PAYOUT : nfvCap;
-    }
-
     function isBalanceCovered(
         address _user,
         uint8 _level
@@ -642,7 +636,6 @@ contract HadesFountain is Ownable {
         Claims storage boostStatus = claims[_user];
         Accounting storage u_acc = accounting[_user];
         //TODO NEED TO REVISIT
-        uint256 cap = capPayout(_currentLevel + level);
         require(boostStatus.boostEnd < block.timestamp, "B1"); //dev: Boost in progress
         require(
             u_acc.deposits > 0 && //only people who are participating can boost
@@ -653,7 +646,8 @@ contract HadesFountain is Ownable {
         ); // dev: Unable to boost
         if (u_acc.done) {
             require(
-                boostStatus.faucetClaims + boostStatus.rebaseClaims < cap,
+                boostStatus.faucetClaims + boostStatus.rebaseClaims <
+                    MAX_PAYOUT,
                 "BX"
             ); // dev: already claimed too much
             u_acc.done = false;
@@ -774,15 +768,14 @@ contract HadesFountain is Ownable {
         if (user.rebaseCount < totalCount) user.rebaseCount = totalCount;
         // This prevents Stack too deep errors
         {
-            uint256 maxPayout = capPayout(user.netFaucet);
             uint256 t_claims = u_claims.rebaseClaims + u_claims.faucetClaims;
-            if (t_claims >= maxPayout) return 0;
+            if (t_claims >= MAX_PAYOUT) return 0;
             if (
                 u_claims.rebaseClaims + userRebase + u_claims.faucetClaims >
-                maxPayout
+                MAX_PAYOUT
             ) {
                 userRebase =
-                    maxPayout -
+                    MAX_PAYOUT -
                     u_claims.rebaseClaims -
                     u_claims.faucetClaims;
                 user.done = true;
