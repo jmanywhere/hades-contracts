@@ -11,10 +11,10 @@ contract DeployTestnetFountain is Script {
         uint256 deployerPrivate = vm.envUint("PRIVATE_KEY");
         address vault = 0x7Ff20b4E1Ad27C5266a929FC87b00F5cCB456374;
         vm.startBroadcast(deployerPrivate);
-        MockHades hades = new MockHades();
-        MockHades cpt = new MockHades();
-        hades.mint();
-        cpt.mint();
+        MockHades hades = MockHades(0x7f3Ea5f3BBfb7a0AcCf6Df8C7ed672CaF9212317);
+        MockHades cpt = MockHades(0x3788f0c29450DF6A3684706a6bFC98B5E188FE4e);
+        // hades.mint();
+        // cpt.mint();
         HadesFountain fountain = new HadesFountain(
             address(hades),
             address(cpt),
@@ -22,6 +22,7 @@ contract DeployTestnetFountain is Script {
             vault,
             block.timestamp
         );
+        hades.approve(address(fountain), type(uint256).max);
         vm.stopBroadcast();
     }
 }

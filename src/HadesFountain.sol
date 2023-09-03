@@ -5,10 +5,14 @@ pragma solidity 0.8.19;
 import {Ownable} from "openzeppelin/access/Ownable.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 
+import "forge-std/console.sol";
+
 //----------------------------------------------
 // ERRORS
 //----------------------------------------------
 error HadesFountain__InvalidUpline(address);
+error HadesFountain__MaxPayoutReached();
+error HadesFountain__InvalidMinimum();
 
 contract HadesFountain is Ownable {
     struct Accounting {
@@ -75,7 +79,7 @@ contract HadesFountain is Ownable {
     uint256 private constant PERCENT = 100;
     int256 private constant REBASE_ZERO_REWARDS = 33_0000;
     uint256 private constant REBASE_REWARD_PERCENTAGE = 100_0000;
-    uint256 public constant REBASE_REWARD = 1_0000; // 1%
+    uint256 public constant REBASE_REWARD = 5000; // 0.5%
 
     // Global stats
     uint256 public total_deposits;
@@ -275,14 +279,15 @@ contract HadesFountain is Ownable {
         address _user = msg.sender;
         Accounting storage user = accounting[_user];
         Claims storage u_claim = claims[_user];
-        (uint8 lvl, ) = userLevel(_user, true);
-        require(
-            u_claim.faucetClaims + u_claim.rebaseClaims < capPayout(lvl),
-            "Need a reset"
-        );
+        if (
+            u_claim.faucetClaims + u_claim.rebaseClaims >=
+            capPayout(user.netFaucet) &&
+            user.netFaucet != 0
+        ) revert HadesFountain__MaxPayoutReached();
         if (user.deposits == 0) {
             total_users++;
-            require(_amount >= minimumInitial, "Initial not met");
+            if (_amount < minimumInitial)
+                revert HadesFountain__InvalidMinimum();
             user.rebaseCount = getTotalRebaseCount() + 1;
         }
         //HANDLE TOKEN INFO
@@ -418,6 +423,7 @@ contract HadesFountain is Ownable {
                 user.rebaseCount
             );
         }
+
         _grossFaucetValue = _netFaucetValue + user.rebaseCompounded;
         uint256 sustainableFee;
         uint256 grossPayout;
@@ -457,7 +463,7 @@ contract HadesFountain is Ownable {
         // added rolls that offset compounding amounts in claims
         int256 playable = (int256)(_nfv + acc.rolls) -
             (int256)(cl.rebaseClaims + cl.faucetEffectiveClaims);
-        _percent = (playable * 100_0000) / (int256)(_nfv);
+        _percent = (playable * int(REBASE_REWARD_PERCENTAGE)) / (int256)(_nfv);
 
         _totalRebaseCount = getTotalRebaseCount(); // GET LAST REBASE TIME
         uint256 rebase_Count = acc.rebaseCount > _totalRebaseCount
@@ -538,11 +544,12 @@ contract HadesFountain is Ownable {
         Accounting storage user = accounting[_user];
         Claims storage u_claims = claims[_user];
         maxPayout = capPayout(user.netFaucet);
-        (uint256 share, ) = userLevel(_user, true);
+        // (uint256 share, ) = userLevel(_user, true);
         grossPayout = (block.timestamp - user.lastAction);
         if (u_claims.faucetClaims + u_claims.rebaseClaims < maxPayout) {
-            share = (user.netFaucet * 1e12) / (100e12 * (24 hours));
-            grossPayout = grossPayout * share;
+            grossPayout =
+                (grossPayout * (user.netFaucet * 1e12)) /
+                (100e12 * (24 hours));
             grossPayout += user.accFaucet;
 
             if (u_claims.faucetClaims + grossPayout > maxPayout)
@@ -627,6 +634,7 @@ contract HadesFountain is Ownable {
     ) internal {
         Claims storage boostStatus = claims[_user];
         Accounting storage u_acc = accounting[_user];
+        //TODO NEED TO REVISIT
         uint256 cap = capPayout(_currentLevel + level);
         require(boostStatus.boostEnd < block.timestamp, "B1"); //dev: Boost in progress
         require(
@@ -666,8 +674,7 @@ contract HadesFountain is Ownable {
         address _user,
         uint256 _payout
     ) internal view returns (uint256) {
-        (uint8 _usr_level, ) = userLevel(_user, true);
-        uint256 whaleBracket = capPayout(_usr_level) / 10;
+        uint256 whaleBracket = MAX_PAYOUT / 10;
         uint256 bracket = (claims[_user].faucetClaims +
             claims[_user].rebaseClaims +
             _payout) / whaleBracket;
@@ -688,7 +695,6 @@ contract HadesFountain is Ownable {
     ) internal returns (uint256 _payout) {
         Accounting storage user = accounting[_user];
         Claims storage u_claims = claims[_user];
-        (uint8 level, ) = userLevel(_user, true);
         _payout = 0;
         if (user.done) return 0;
         // REBASE CLAIMS DO COUNT TOWARDS MAX PAYOUT
@@ -699,19 +705,17 @@ contract HadesFountain is Ownable {
             uint256 _netPayout,
 
         ) = faucetPayout(_user);
-        uint256 cap = capPayout(level);
-        cap = max_payout > cap ? cap : max_payout;
         uint256 compoundTaxedPayout;
         if (_netPayout > 0) {
             if (
                 u_claims.faucetClaims + _netPayout + u_claims.rebaseClaims >=
-                cap
+                max_payout
             ) {
-                if (u_claims.faucetClaims + u_claims.rebaseClaims >= cap)
+                if (u_claims.faucetClaims + u_claims.rebaseClaims >= max_payout)
                     _netPayout = 0;
                 else
                     _netPayout =
-                        cap -
+                        max_payout -
                         u_claims.faucetClaims -
                         u_claims.rebaseClaims;
                 user.done = true;
@@ -768,17 +772,15 @@ contract HadesFountain is Ownable {
         if (user.rebaseCount < totalCount) user.rebaseCount = totalCount;
         // This prevents Stack too deep errors
         {
-            (uint8 _level, ) = userLevel(_user, true);
-            uint256 cap = capPayout(_level);
             uint256 maxPayout = capPayout(user.netFaucet);
             uint256 t_claims = u_claims.rebaseClaims + u_claims.faucetClaims;
-            cap = maxPayout > cap ? cap : maxPayout;
-            if (t_claims >= cap) return 0;
+            if (t_claims >= maxPayout) return 0;
             if (
-                u_claims.rebaseClaims + userRebase + u_claims.faucetClaims > cap
+                u_claims.rebaseClaims + userRebase + u_claims.faucetClaims >
+                maxPayout
             ) {
                 userRebase =
-                    cap -
+                    maxPayout -
                     u_claims.rebaseClaims -
                     u_claims.faucetClaims;
                 user.done = true;
@@ -900,9 +902,6 @@ contract HadesFountain is Ownable {
             // If we have reached the top of the chain, the owner
             if (_up == address(0) || _up == owner()) {
                 //The equivalent of looping through all available
-                // while we build, send to vault
-                payoutUser(vault, _bonus); // Will send the bonus to the lottery
-                emit AddLotteryFunds(_bonus);
                 team[_user].refClaimRound = maxRefDepth;
                 break;
             }
