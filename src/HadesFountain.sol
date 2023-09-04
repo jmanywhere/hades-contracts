@@ -16,15 +16,17 @@ error HadesFountain__InvalidMinimum();
 
 //TODO s
 /*
-    - NFV = NetFaucet - claims, check that rolls are not a net zero thing.
-    - cap payout is always 100k HADES regardless.
-    - if user drops to zero, they are done.
+    -✅ NFV = NetFaucet - claims, check that rolls are not a net zero thing.
+    -✅ cap payout is always 100k HADES regardless.
+    -✅ if user drops to zero, they are done.
     - if user has a time diff of 7 days since last action, they dont accumulate any more rewards
       - on day 8, the rewards can be "LIQUIDATED" which means it gets added to another users's faucet.
       - each second after day 8 starts, a portion of the user's NFV is substracted and added to the liquidator's NFV
         - Liquidator HAS to have a FAUCET and NOT be DONE otherwise tx will fail.
         - Liquidations count as claims.
-    - REvisit Whale Fee
+        - 4% daily
+    -✅ Revisit Whale Fee
+    - Revisit Queue system
  */
 
 contract HadesFountain is Ownable {
@@ -39,6 +41,7 @@ contract HadesFountain is Ownable {
         uint256 accRebase; // accumulated but not claimed rebases
         uint256 rebaseCount; // last rebase claimed
         uint256 lastAction; // last action timestamp
+        uint256 faucetPenaltyDailyValue; // daily penalty value for Liquidations
         bool done; // is user done?
     }
 
@@ -106,7 +109,6 @@ contract HadesFountain is Ownable {
     address public vault;
     address public pol;
 
-    uint256 public faucetWhaleBracket;
     uint256 public maxWhaleBracket = 10;
     uint8 public maxRefDepth;
     bool public leadOrLotto = false;
@@ -239,7 +241,6 @@ contract HadesFountain is Ownable {
         busd = IERC20(_busd);
         token = IERC20(_token);
         start = _start;
-        faucetWhaleBracket = 7500 ether; // 1% of Total Supply
         maxRefDepth = 15; // 15 levels deep max
         uint256 prev1Num = 1 ether;
         uint256 prev2Num = 2 ether;
@@ -668,7 +669,14 @@ contract HadesFountain is Ownable {
     //----------------------------------------------
     function updateNetFaucet(address _user) internal {
         Accounting storage user = accounting[_user];
-        user.netFaucet = user.deposits + user.airdrops_rcv + user.rolls;
+        Claims storage u_claims = claims[_user];
+
+        uint totalClaims = u_claims.faucetClaims + u_claims.rebaseClaims;
+        uint totalPositives = user.deposits + user.airdrops_rcv + user.rolls;
+        if (totalClaims >= totalPositives) {
+            user.netFaucet = 0;
+            user.done = true;
+        } else user.netFaucet = totalPositives - totalClaims;
     }
 
     function whaleFee(
@@ -986,11 +994,6 @@ contract HadesFountain is Ownable {
     function setMinimumInitial(uint256 _newVal) external onlyOwner {
         require(_newVal > 0, "MI0"); // dev: invalid minimum
         minimumInitial = _newVal;
-    }
-
-    function setWhaleBracketSize(uint256 _newSize) external onlyOwner {
-        require(_newSize > 0, "WB0"); // Invalid Whale bracket
-        faucetWhaleBracket = _newSize;
     }
 
     function setGovHold(uint8 index, uint256 _val) external onlyOwner {
