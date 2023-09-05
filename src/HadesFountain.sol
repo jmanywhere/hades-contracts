@@ -19,6 +19,8 @@ error HadesFountain__InvalidMinimum();
     -✅ NFV = NetFaucet - claims, check that rolls are not a net zero thing.
     -✅ cap payout is always 100k HADES regardless.
     -✅ if user drops to zero, they are done.
+    - Compounding individually is OK, claiming is NOT
+        - Claims both faucet and rebase
     - if user has a time diff of 7 days since last action, they dont accumulate any more rewards
       - on day 8, the rewards can be "LIQUIDATED" which means it gets added to another users's faucet.
       - each second after day 8 starts, a portion of the user's NFV is substracted and added to the liquidator's NFV
@@ -49,6 +51,7 @@ contract HadesFountain is Ownable {
         uint256 faucetClaims;
         uint256 rebaseClaims;
         uint256 faucetEffectiveClaims;
+        uint256 rebaseEffectiveClaims;
         uint256 boostEnd;
         uint8 boostLvl;
     }
@@ -93,8 +96,10 @@ contract HadesFountain is Ownable {
     uint256 public constant MAX_PAYOUT = 100_000 ether;
     uint256 private constant MAX_DURATION = 365; // days
     uint256 private constant PERCENT = 100;
-    int256 private constant REBASE_ZERO_REWARDS = 33_0000;
+    uint256 private constant REBASE_LIMITED_REWARDS = 50_0000;
+    uint256 private constant REBASE_ZERO_REWARDS = 25_0000;
     uint256 private constant REBASE_REWARD_PERCENTAGE = 100_0000;
+    uint256 private constant REBASE_ZERO_FAUCET_PERCENTAGE = 10_0000;
     uint256 public constant REBASE_REWARD = 5000; // 0.5%
 
     // Global stats
@@ -329,36 +334,43 @@ contract HadesFountain is Ownable {
         uint256 _payout = claimRebase(msg.sender, false, false);
         _payout += claimFaucet(false, false, 0, msg.sender);
         payoutUser(msg.sender, _payout);
+        updateNetFaucet(msg.sender);
     }
 
     function compoundAuto(address _user) external onlyOwner {
         claimRebase(_user, false, true);
         claimFaucet(true, false, 0, _user);
+        updateNetFaucet(_user);
     }
 
     function compoundAll() external {
         claimRebase(msg.sender, false, true);
         claimFaucet(true, false, 0, msg.sender);
+        updateNetFaucet(msg.sender);
     }
 
     function compoundFaucet() external {
         claimRebase(msg.sender, true, false);
         claimFaucet(true, false, 0, msg.sender);
+        updateNetFaucet(msg.sender);
     }
 
     function compoundRebase() external {
         claimRebase(msg.sender, false, true);
+        updateNetFaucet(msg.sender);
     }
 
     function rebaseClaim() external {
         uint256 _payout = claimRebase(msg.sender, false, false);
         payoutUser(msg.sender, _payout);
+        updateNetFaucet(msg.sender);
     }
 
     function faucetClaim() external {
         claimRebase(msg.sender, true, false);
         uint256 _payout = claimFaucet(false, false, 0, msg.sender);
         payoutUser(msg.sender, _payout);
+        updateNetFaucet(msg.sender);
     }
 
     function airdrop(address _receiver, uint256 _amount, uint8 _level) public {
@@ -416,7 +428,7 @@ contract HadesFountain is Ownable {
             uint256 _faucetPayout, // User's available faucet payout
             uint256 _faucetMaxPayout, // User's max faucet payout
             uint256 _rebasePayout, // User's available rebase payout
-            int256 _nerdPercent
+            uint256 _nerdPercent
         )
     {
         Accounting storage user = accounting[_user];
@@ -451,6 +463,14 @@ contract HadesFountain is Ownable {
         _faucetMaxPayout = MAX_PAYOUT - _grossClaimed;
     }
 
+    /**
+     *
+     * @param _user The user to calculater rebase rewards for
+     * @return _totalRebase Total rebase to be rewarded
+     * @return _userRebase Adjusted rebase rewards if necessary
+     * @return _totalRebaseCount Number of rebase cycles that have passed
+     * @return _percent The percentage of the user's NFV over total positives
+     */
     function calculateRebase(
         address _user
     )
@@ -460,7 +480,7 @@ contract HadesFountain is Ownable {
             uint256 _totalRebase,
             uint256 _userRebase,
             uint256 _totalRebaseCount,
-            int256 _percent
+            uint256 _percent
         )
     {
         Accounting storage acc = accounting[_user];
@@ -468,11 +488,10 @@ contract HadesFountain is Ownable {
         Claims storage cl = claims[_user];
 
         uint256 _nfv = acc.netFaucet + tm.airdrops_sent;
-        if (_nfv == 0) _nfv = 1;
-        // added rolls that offset compounding amounts in claims
-        int256 playable = (int256)(_nfv + acc.rolls) -
-            (int256)(cl.rebaseClaims + cl.faucetEffectiveClaims);
-        _percent = (playable * int(REBASE_REWARD_PERCENTAGE)) / (int256)(_nfv);
+        uint256 positives = acc.deposits + acc.rolls + acc.airdrops_rcv;
+        if (positives == 0) positives = 1;
+
+        _percent = (_nfv * REBASE_REWARD_PERCENTAGE) / positives;
 
         _totalRebaseCount = getTotalRebaseCount(); // GET LAST REBASE TIME
         uint256 rebase_Count = acc.rebaseCount > _totalRebaseCount
@@ -486,21 +505,21 @@ contract HadesFountain is Ownable {
         _totalRebase = _totalRebase / (48 * REBASE_REWARD_PERCENTAGE);
         _totalRebase += acc.accRebase;
 
-        if (_percent <= -REBASE_ZERO_REWARDS)
+        if (_percent <= REBASE_ZERO_REWARDS)
             return (_totalRebase, 0, _totalRebaseCount, _percent);
 
-        uint256 maxRebase = (_nfv * uint256(_percent + REBASE_ZERO_REWARDS)) /
-            REBASE_REWARD_PERCENTAGE;
-        // Cap rebase withdraw to what takes them to -33%
+        uint256 maxRebase = _nfv -
+            ((positives * REBASE_ZERO_REWARDS) / REBASE_REWARD_PERCENTAGE);
+        // Cap rebase withdraw to what takes them to REBASE_ZERO_REWARDS
         if (_totalRebase > maxRebase) _totalRebase = maxRebase;
         // Well behaved user... full amount
-        if (_percent > 0)
+        if (_percent > REBASE_LIMITED_REWARDS)
             return (_totalRebase, _totalRebase, _totalRebaseCount, _percent);
         // Poorly behaved user... no amount
         // in the negative, reduce rewards linearly
         _userRebase =
-            ((uint256)(REBASE_ZERO_REWARDS + _percent) * _totalRebase) /
-            uint256(REBASE_ZERO_REWARDS);
+            ((REBASE_ZERO_REWARDS + _percent) * _totalRebase) /
+            REBASE_ZERO_REWARDS;
     }
 
     function boostRebase(
@@ -667,12 +686,29 @@ contract HadesFountain is Ownable {
     //----------------------------------------------
     //            ACCOUNTING INTERNALS            //
     //----------------------------------------------
+
+    /**
+     * Updates NFV value for _user
+     * @param _user user address that will be updated
+     * @dev NFV is the difference between all postive actions (deposits, faucetCompounds and airdrops received)
+     *  and all claiming actions (faucetEffectiveClaims and rebaseClaims)
+     *  - faucetEffective claims are used instead of faucetClaims, just to keep
+     *      a net zero difference between rolls and claims when compounding
+     *  - rolls(faucet compounds) are duplicated to make sure that compounding has a positive
+     *      effect on NFV.
+     */
     function updateNetFaucet(address _user) internal {
         Accounting storage user = accounting[_user];
         Claims storage u_claims = claims[_user];
 
-        uint totalClaims = u_claims.faucetClaims + u_claims.rebaseClaims;
-        uint totalPositives = user.deposits + user.airdrops_rcv + user.rolls;
+        uint totalClaims = u_claims.faucetEffectiveClaims +
+            u_claims.rebaseEffectiveClaims;
+
+        uint totalPositives = user.deposits +
+            user.airdrops_rcv +
+            (user.rolls * 2) +
+            user.rebaseCompounded;
+
         if (totalClaims >= totalPositives) {
             user.netFaucet = 0;
             user.done = true;
@@ -770,7 +806,7 @@ contract HadesFountain is Ownable {
             uint256 totalRebase,
             uint256 userRebase,
             uint256 totalCount,
-            int256 nerdPercent
+            uint256 nerdPercent
         ) = calculateRebase(_user);
         userRebase = boostRebase(userRebase, _user, u_claims, user.rebaseCount);
         if (user.rebaseCount < totalCount) user.rebaseCount = totalCount;
@@ -794,18 +830,24 @@ contract HadesFountain is Ownable {
             user.accRebase = totalRebase;
         } else if (compound) {
             _payout = userRebase;
-            user.rebaseCompounded += (_payout * 90) / 100;
+            uint actualPayout = (_payout * 90) / 100;
+            user.rebaseCompounded += actualPayout;
+            u_claims.rebaseEffectiveClaims += actualPayout;
+            u_claims.rebaseClaims += userRebase;
             user.accRebase = 0;
-            emit RebaseCompound(_user, userRebase, (_payout * 90) / 100);
+            emit RebaseCompound(_user, userRebase, actualPayout);
         } else {
             //  IF PERCENT <= 33%
             //      update Reducer Directly
             //      rebase compound cannot be smaller than 0
-            if (nerdPercent <= -330000)
-                user.rebaseCompounded = nerdPercent > -1000000
+            if (nerdPercent <= REBASE_ZERO_REWARDS)
+                user.rebaseCompounded = nerdPercent >
+                    REBASE_ZERO_FAUCET_PERCENTAGE
                     ? (user.rebaseCompounded *
-                        (uint256)(1000000 + nerdPercent)) / 670000
+                        (nerdPercent - REBASE_ZERO_FAUCET_PERCENTAGE)) /
+                        (REBASE_ZERO_REWARDS - REBASE_ZERO_FAUCET_PERCENTAGE)
                     : 0;
+            u_claims.rebaseEffectiveClaims += userRebase;
             u_claims.rebaseClaims += userRebase;
             total_claims += userRebase;
             user.accRebase = 0;
