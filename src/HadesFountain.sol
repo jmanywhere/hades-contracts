@@ -13,21 +13,28 @@ import "forge-std/console.sol";
 error HadesFountain__InvalidUpline(address);
 error HadesFountain__MaxPayoutReached();
 error HadesFountain__InvalidMinimum();
+error HadesFountain__InvalidUser(address);
+error HadesFountain__InvalidPendingAmount(uint amount, uint pending);
 
 //TODO s
 /*
     -✅ NFV = NetFaucet - claims, check that rolls are not a net zero thing.
     -✅ cap payout is always 100k HADES regardless.
     -✅ if user drops to zero, they are done.
-    - Compounding individually is OK, claiming is NOT
-        - Claims both faucet and rebase
+    -✅ Revisit Whale Fee
+    -✅ Compounding individually is OK, claiming is NOT (claim is ALL or nothing)
+    -✅ Revisit Airdrops
+        -✅ Round Robin, moves on up, once it gets to the top it goes to vault then resets
+        -✅ Downline is determined the amount of scepter ($CPT) that the user has
+        -✅ Fees are split -> 50% to liquidity (tokens stay in vault), 50% passed regularly to leader
+        -✅ Whoever can airdrop funds from their `Airdrops Pending` to their downlines
+        -✅ Pending Airdrop amount -> Everything that is airdropped to you is pending until you make a deposit.
     - if user has a time diff of 7 days since last action, they dont accumulate any more rewards
       - on day 8, the rewards can be "LIQUIDATED" which means it gets added to another users's faucet.
       - each second after day 8 starts, a portion of the user's NFV is substracted and added to the liquidator's NFV
         - Liquidator HAS to have a FAUCET and NOT be DONE otherwise tx will fail.
         - Liquidations count as claims.
         - 4% daily
-    -✅ Revisit Whale Fee
     - Revisit Queue system
  */
 
@@ -38,7 +45,8 @@ contract HadesFountain is Ownable {
         uint256 deposits; // Hard Deposits made
         uint256 rolls; // faucet Compounds
         uint256 rebaseCompounded; // RebaseCompounds
-        uint256 airdrops_rcv; // Received Airdrops
+        uint256 airdrops_rcv; // Received Airdrops (airdrops added to Faucet already)
+        uint256 airdrops_pending; // Airdrops pending to be added to NFV
         uint256 accFaucet; // accumulated but not claimed faucet due to referrals
         uint256 accRebase; // accumulated but not claimed rebases
         uint256 rebaseCount; // last rebase claimed
@@ -322,6 +330,16 @@ contract HadesFountain is Ownable {
         claimRebase(msg.sender, false, true);
         claimFaucet(true, true, realizedAmount, msg.sender);
 
+        if (user.airdrops_pending > 0) {
+            if (user.airdrops_pending > _amount) {
+                user.airdrops_pending -= _amount;
+                user.airdrops_rcv += _amount;
+            } else {
+                user.airdrops_rcv += user.airdrops_pending;
+                user.airdrops_pending = 0;
+            }
+        }
+
         emit Deposit(_user, _amount, realizedAmount);
         user.deposits += realizedAmount;
         updateNetFaucet(_user);
@@ -360,52 +378,44 @@ contract HadesFountain is Ownable {
         updateNetFaucet(msg.sender);
     }
 
-    function rebaseClaim() external {
-        uint256 _payout = claimRebase(msg.sender, false, false);
-        payoutUser(msg.sender, _payout);
-        updateNetFaucet(msg.sender);
-    }
-
-    function faucetClaim() external {
-        claimRebase(msg.sender, true, false);
-        uint256 _payout = claimFaucet(false, false, 0, msg.sender);
-        payoutUser(msg.sender, _payout);
-        updateNetFaucet(msg.sender);
-    }
-
-    function airdrop(address _receiver, uint256 _amount, uint8 _level) public {
+    function airdrop(
+        address _receiver,
+        uint256 _amount,
+        bool fromPending
+    ) public {
         require(_receiver != msg.sender, "No gaming");
         // CALCULATE TAXED VALUE
         uint256 realizedAmount = _amount / 10;
         realizedAmount = _amount - realizedAmount;
         //TRANSFER TAXED TOKENS
-        token.transferFrom(msg.sender, vault, _amount);
+        if (fromPending) {
+            if (accounting[msg.sender].airdrops_pending < _amount)
+                revert HadesFountain__InvalidPendingAmount(
+                    _amount,
+                    accounting[msg.sender].airdrops_pending
+                );
+
+            accounting[msg.sender].airdrops_pending -= _amount;
+            realizedAmount = _amount;
+        } else {
+            token.transferFrom(msg.sender, vault, _amount);
+        }
         //ACCUMULATE PAYOUTS
         Team storage teamLeader = team[msg.sender];
-        Accounting storage leader = accounting[msg.sender];
         Accounting storage user = accounting[_receiver];
-        require(user.deposits > 0, "NonPlayer");
+        if (user.netFaucet == 0 || user.done)
+            revert HadesFountain__InvalidUser(_receiver);
+        // User accumulates stuff
         claimRebase(_receiver, true, false);
         (uint256 grossPayout, , ) = faucetPayout(_receiver);
         user.accFaucet = grossPayout;
-        // KICKBACK Calculation
-        uint256 leaderKick = 0;
-        if (_level > 1) {
-            // level 0 does not exist, level 1 is base level and works only on referral giveouts
-            (uint8 currentLevel, ) = userLevel(msg.sender, true);
-            require(currentLevel >= _level, "Invalid Level");
-            leaderKick = (realizedAmount * kickback[_level - 1]) / 100;
-        }
+
         //SPLIT AIRDROPS
-        user.airdrops_rcv += realizedAmount - leaderKick;
+        user.airdrops_pending += realizedAmount;
         user.lastAction = block.timestamp;
         updateNetFaucet(_receiver);
         teamLeader.airdrops_sent += _amount;
         teamLeader.lastAirdropSent = block.timestamp;
-        if (leaderKick > 0) {
-            leader.airdrops_rcv += leaderKick;
-            updateNetFaucet(msg.sender);
-        }
         total_airdrops += realizedAmount;
         // USER AIRDROPPED
         emit Airdrop(msg.sender, _receiver, realizedAmount);
@@ -422,7 +432,6 @@ contract HadesFountain is Ownable {
         view
         returns (
             uint256 _grossClaimed,
-            int256 _netDeposits,
             uint256 _netFaucetValue,
             uint256 _grossFaucetValue,
             uint256 _faucetPayout, // User's available faucet payout
@@ -436,9 +445,6 @@ contract HadesFountain is Ownable {
 
         _grossClaimed = u_claims.faucetEffectiveClaims + u_claims.rebaseClaims;
         _netFaucetValue = user.netFaucet;
-        _netDeposits =
-            (int256)(_netFaucetValue + team[_user].airdrops_sent + user.rolls) -
-            (int256)(_grossClaimed);
         if (!user.done) {
             (, _rebasePayout, , _nerdPercent) = calculateRebase(_user);
             _rebasePayout = boostRebase(
@@ -484,11 +490,9 @@ contract HadesFountain is Ownable {
         )
     {
         Accounting storage acc = accounting[_user];
-        Team storage tm = team[_user];
-        Claims storage cl = claims[_user];
 
-        uint256 _nfv = acc.netFaucet + tm.airdrops_sent;
-        uint256 positives = acc.deposits + acc.rolls + acc.airdrops_rcv;
+        uint256 _nfv = acc.netFaucet - acc.airdrops_rcv;
+        uint256 positives = acc.deposits + acc.rolls;
         if (positives == 0) positives = 1;
 
         _percent = (_nfv * REBASE_REWARD_PERCENTAGE) / positives;
@@ -603,8 +607,8 @@ contract HadesFountain is Ownable {
     }
 
     function isNetPositive(address _user) public view returns (bool) {
-        (, int256 net_deposits, , , , , , ) = getNerdData(_user);
-        return net_deposits >= 0;
+        (, , , , , , uint percent) = getNerdData(_user);
+        return percent >= REBASE_LIMITED_REWARDS;
     }
 
     function userLevel(
@@ -939,8 +943,8 @@ contract HadesFountain is Ownable {
         //for deposit _addr is the sender/depositor
         address _up = team[_user].upline;
         uint256 _bonus = (_amount * _bonusPercent) / 100; // 10% of amount
-        uint256 _share = _bonus / 4; // 2.5% of amount
-        uint256 _up_share = _bonus - _share; // 7.5% of amount
+        uint256 _share = _bonus / 2; // HALF OF BONUS
+        uint256 _up_share = _bonus - _share; // HALF of amount
         bool _team_found = false;
 
         for (uint8 i = 0; i < maxRefDepth; i++) {
@@ -961,30 +965,18 @@ contract HadesFountain is Ownable {
 
                         (uint256 gross_payout_upline, , ) = faucetPayout(_up);
                         accounting[_up].accFaucet = gross_payout_upline;
-                        accounting[_up].airdrops_rcv += _up_share;
+                        accounting[_up].airdrops_pending += _up_share;
                         accounting[_up].lastAction = block.timestamp;
-
-                        updateNetFaucet(_up);
 
                         (uint256 gross_payout_user, , ) = faucetPayout(_user);
                         accounting[_user].accFaucet = gross_payout_user;
                         accounting[_user].lastAction = block.timestamp;
-                        updateNetFaucet(_user);
 
                         //match accounting
                         team[_up].match_bonus += _up_share;
 
-                        //Synthetic Airdrop tracking; team wallets get automatic airdrop benefits
-                        team[_up].airdrops_sent += _share;
-                        team[_up].lastAirdropSent = block.timestamp;
-                        accounting[_user].airdrops_rcv += _share;
-
-                        //Global airdrops
-                        total_airdrops += _share;
-
                         //Events
                         emit UplineAidrop(_user, _up, i + 1, _up_share);
-                        emit Airdrop(_up, _user, _share);
                     } else {
                         (uint256 gross_payout, , ) = faucetPayout(_up);
                         accounting[_up].accFaucet = gross_payout;
