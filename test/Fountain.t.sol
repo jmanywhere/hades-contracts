@@ -42,7 +42,7 @@ contract FountainTest is Test {
         fountain.deposit(1000 ether, address(this));
 
         assertEq(hades.balanceOf(vault), vaultBalance + 1000 ether);
-        (, , uint nfv, , , , , ) = fountain.getNerdData(user1);
+        (, , uint nfv, , , , ) = fountain.getNerdData(user1);
 
         assertEq(nfv, 900 ether);
     }
