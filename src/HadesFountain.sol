@@ -522,7 +522,7 @@ contract HadesFountain is Ownable {
         // Poorly behaved user... no amount
         // in the negative, reduce rewards linearly
         _userRebase =
-            ((REBASE_ZERO_REWARDS + _percent) * _totalRebase) /
+            ((_percent - REBASE_ZERO_REWARDS) * _totalRebase) /
             REBASE_ZERO_REWARDS;
     }
 
